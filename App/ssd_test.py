@@ -43,6 +43,7 @@ def load_inventory(path=INVENTORY):
         row["serial"] = sn
         row["psid"] = row["psid"].strip().upper()
         row["model"] = row["model"].strip().upper()
+        if not row["model"].startswith("SAMSUNG "):row["model"] = "SAMSUNG " + row["model"]
     return {row["serial"]: row for row in rows}
 
 
