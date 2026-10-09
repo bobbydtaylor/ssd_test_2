@@ -9,12 +9,12 @@ ssd_test/
 │   ├── REQUIREMENTS.md
 │   └── ARCHITECTURE.md
 │
-├── tests/
+├── Tests/
 │   └── test_ssd_test.py
 │
-├── reports/
+├── Reports/
 │   ├── inventory.csv
-│   └── SERIAL_NUMBER/
+│   └── Serial_number/
 │       ├── report.pdf
 │       └── execution.log
 │
