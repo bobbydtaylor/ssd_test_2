@@ -1,61 +1,205 @@
+
 # SSD Test and Sanitization — Architecture
 
 ## 1. Application
 
-`ssd_test.py` runs under Python 3.14 on the Ubuntu Lenovo M910q and invokes Linux storage utilities via subprocess. There is no automatic-start service.
+`App/ssd_test.py` runs under Python 3.14 on the Ubuntu Lenovo ThinkCentre M910q.
+
+The application invokes Linux storage utilities through Python subprocesses. Processing starts manually and continues unattended.
 
 ## 2. Inputs
 
-- `ssd_inventory.csv`: serial, model, capacity, PSID; unmatched or unconfirmed PSIDs are rejected.
-- Electronic NVMe identity read from the controller.
-- `--execute`: opt-in to destructive processing; without it the application performs read-only preflight.
+- `App/ssd_inventory.csv`: SSD model, serial number, capacity, and PSID.
+- Electronic NVMe controller identification.
+- `--execute`: Enables destructive operations. Without this argument, the application performs read-only preflight.
+
+The electronic model and serial number must match the corresponding inventory record.
 
 ## 3. Dependencies
 
-- `lsblk`: physical device tree, system drive exclusion, mount detection.
-- `nvme-cli`: controller identity, SMART data, short self-test and result log.
-- `blockdev`: device byte size.
-- `dd`: logical-address zero overwrite with direct I/O and synchronization.
-- Python raw device reads: distributed zero verification.
-- `sedutil-cli`: TCG Opal PSID Revert and security-state query.
-- `parted`: post-revert partition table inspection.
-- `reportlab`: PDF output.
+- `lsblk`: Device enumeration, mount detection, and system-drive exclusion.
+- `nvme-cli`: Controller identification, SMART data, and NVMe self-tests.
+- `blockdev`: Logical device capacity.
+- `dd`: Full logical-device zero overwrite.
+- Python binary file reads: Distributed zero verification.
+- `sedutil-cli`: TCG Opal query and PSID Revert.
+- `parted`: Partition-table inspection.
+- `reportlab`: Printable PDF generation.
 
-## 4. Procedure
+## 4. Processing Sequence
 
-1. Enumerate drives and exclude any device containing `/`, `/boot`, or `/boot/efi`.
-2. Confirm exactly one NVMe namespace, no mounted partitions and no active swap.
-3. Match electronic serial and model against `ssd_inventory.csv` and require a confirmed PSID.
-4. Check previous result and initial SMART health.
-5. Run and evaluate NVMe short self-test.
-6. Recheck target identity and mount status.
-7. Overwrite full device length with zero bytes using `dd`.
-8. Read 32 evenly distributed 1 MiB samples and compare each byte to zero.
-9. Execute PSID Revert using `sedutil-cli`.
-10. Require `revertTper completed successfully`.
-11. Query Opal security state, inspect partitions and read final SMART health.
-12. Generate CSV summary, PDF report and execution log.
+1. Identify the Ubuntu system drive and installed NVMe devices.
+2. Exclude the system drive and reject ambiguous or mounted targets.
+3. Read the target SSD's electronic model and serial number.
+4. Match the SSD against `App/ssd_inventory.csv`.
+5. Retrieve and validate the drive-specific PSID.
+6. Check previous processing records.
+7. Collect initial SMART data.
+8. Execute and evaluate the NVMe short self-test.
+9. Revalidate the target SSD.
+10. Overwrite the complete host-accessible logical address space with zeros.
+11. Verify distributed samples of overwritten logical storage.
+12. Execute TCG Opal PSID Revert.
+13. Verify firmware-reported PSID Revert completion.
+14. Query the post-revert Opal security state.
+15. Check drive accessibility and partition information.
+16. Collect final SMART information.
+17. Evaluate the overall result.
+18. Generate the printable PDF report, execution log, and CSV results.
+19. Exit.
 
-## 5. Results
+## 5. Target Protection
 
-- `reports/inventory.csv`: one summary row per serial number.
-- `reports/<serial>/report.pdf`: printable result report.
-- `reports/<serial>/execution.log`: timestamped operation log.
+- Identify the physical drive containing the Ubuntu root filesystem.
+- Exclude that drive from destructive operations.
+- Require exactly one NVMe test namespace.
+- Reject mounted target partitions.
+- Reject active swap on the target.
+- Match electronic model and serial number against inventory.
+- Revalidate the target before overwrite.
+- Prevent repeated processing of completed SSDs.
 
-Overall PASS requires the acceptance criteria in `REQUIREMENTS.md`. Otherwise FAIL is recorded. Command failures terminate further destructive operations.
+## 6. Diagnostics
 
-## 6. Execution
+Collect:
 
-Read-only preflight:
+- Model
+- Serial number
+- Firmware version
+- Capacity
+- Critical warnings
+- Available spare
+- Available spare threshold
+- Percentage used
+- Power-on hours
+- Power cycles
+- Media and data integrity errors
+- NVMe short self-test result
 
-    sudo .venv/bin/python ssd_test.py
+## 7. Logical-Device Overwrite
 
-Execute processing:
+Use `dd` to write zeros across the complete host-accessible logical capacity.
 
-    sudo .venv/bin/python ssd_test.py --execute
+- Transfer block size: 16 MiB.
+- Direct output I/O.
+- Synchronize writes before completion.
+- Record total bytes written and elapsed time.
+- Treat unexpected I/O errors as failures.
 
-## 7. Implementation
+Verify the overwrite by reading 32 distributed samples of 1 MiB each.
 
-- Python standard library for orchestration and CSV.
+Record the number of samples, bytes checked, and verification result.
+
+## 8. TCG Opal PSID Revert
+
+Use `sedutil-cli`.
+
+### Capability Query
+
+Query the installed SSD and confirm TCG Opal support.
+
+### PSID Selection
+
+Read the SSD's electronic serial number and match it to `App/ssd_inventory.csv`.
+
+Require a valid 32-character PSID.
+
+### Revert
+
+Execute the PSID Revert command using the matched PSID.
+
+Require the response:
+
+    revertTper completed successfully
+
+### Post-Revert Verification
+
+Verify:
+
+- SSD remains accessible.
+- Opal security information can be read.
+- Locked state is disabled.
+- Locking is disabled.
+- SMART health information remains accessible.
+
+Record the partition inspection result.
+
+## 9. Result Classification
+
+### PASS
+
+All required diagnostics, zero overwrite, sample verification, PSID Revert, and post-revert checks succeed.
+
+### FAIL
+
+A required operation fails or a health acceptance criterion is not met.
+
+## 10. Reporting
+
+### CSV Inventory
+
+`Reports/inventory.csv`
+
+Maintain one processing-result record per SSD, including:
+
+- Timestamp
+- Serial number
+- Model
+- Capacity
+- Final result
+- Overwrite result
+- Verification result
+- PSID Revert result
+- SMART health information
+
+### Individual SSD Reports
+
+`Reports/<SERIAL_NUMBER>/report.pdf`
+
+Include:
+
+- SSD identification
+- Processing date
+- SMART health information
+- Diagnostic results
+- Overwrite results
+- Verification coverage and results
+- PSID Revert result
+- Post-revert security state
+- Overall result
+
+### Execution Log
+
+`Reports/<SERIAL_NUMBER>/execution.log`
+
+Record processing events, completion information, and errors.
+
+## 11. Error Handling
+
+- Stop destructive processing after a required operation fails.
+- Preserve available diagnostic results.
+- Record command failures and error information.
+- Generate a failure report for processing errors.
+- Do not automatically retry destructive operations.
+- Do not automatically reprocess previously completed SSDs.
+
+## 12. Execution
+
+### Preflight
+
+    sudo .venv/bin/python App/ssd_test.py
+
+### Processing
+
+    sudo .venv/bin/python App/ssd_test.py --execute
+
+Commands execute from the repository root.
+
+## 13. Implementation
+
+- Python standard library for orchestration and CSV files.
 - ReportLab for PDF generation.
-- No database, GUI, cloud dependency, or background process.
+- Sequential processing of one SSD.
+- Local reporting.
+- No automatic startup.
+- No database or graphical interface.

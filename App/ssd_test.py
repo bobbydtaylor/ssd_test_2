@@ -13,8 +13,10 @@ import sys
 import time
 
 BASE = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE.parent
+
 INVENTORY = BASE / "ssd_inventory.csv"
-REPORTS = BASE / "reports"
+REPORTS = PROJECT_ROOT / "Reports"
 REQUIRED = ("nvme", "sedutil-cli", "dd", "lsblk", "findmnt", "blockdev", "parted")
 
 
