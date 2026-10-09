@@ -16,8 +16,8 @@ Automate testing and secure erasure of used NVMe SSDs recovered from retired com
 ## 3. Functional Requirements
 
 - REQ-01: Process one NVMe SSD per execution.
-- REQ-02: Automatically start processing when Ubuntu boots.
-- REQ-03: Operate unattended without user interaction.
+- REQ-02: Start processing manually from Ubuntu.
+- REQ-03: Operate unattended after manual initiation.
 - REQ-04: Automatically identify the test SSD by model, serial number, and capacity.
 - REQ-05: Protect the Ubuntu system drive from erasure.
 - REQ-06: Collect SMART health information.
@@ -27,16 +27,16 @@ Automate testing and secure erasure of used NVMe SSDs recovered from retired com
 - REQ-10: Verify successful completion of the erase operation.
 - REQ-11: Verify SSD accessibility and health after erasure.
 - REQ-12: Stop processing the current SSD when an operation fails.
-- REQ-13: Generate a report for each SSD.
-- REQ-14: Maintain a CSV inventory of processed SSDs.
-- REQ-15: Record PASS, FAIL, or REVIEW status.
-- REQ-16: Prevent repeated processing of previously completed SSDs.
-- REQ-17: Save diagnostic results and error information.
-- REQ-18: Support repeated operation with different SSDs without software reconfiguration.
-- REQ-19: Generate a printable report for each SSD.
-- REQ-20: Include SSD identification, tests performed, test results, and health information in the printable report.
-- REQ-21: Document the secure erase method and completion status.
-- REQ-22: Identify whether the SSD passed all required tests and was successfully securely erased.
+- REQ-13: Maintain a CSV inventory of processed SSDs.
+- REQ-14: Record PASS, FAIL, or REVIEW status.
+- REQ-15: Prevent repeated processing of previously completed SSDs.
+- REQ-16: Save diagnostic results and error information.
+- REQ-17: Support repeated operation with different SSDs without software reconfiguration.
+- REQ-18: Generate an individual printable report for each SSD.
+- REQ-19: Include SSD identification, tests performed, test results, and health information in the printable report.
+- REQ-20: Document the secure erase method and completion status.
+- REQ-21: Identify whether the SSD passed all required tests and was successfully securely erased.
+- REQ-22: Do not start SSD processing automatically when Ubuntu boots.
 
 ## 4. Acceptance Criteria
 
@@ -58,16 +58,18 @@ An SSD receives REVIEW when required diagnostic information is unavailable or re
 
 1. Shut down the computer.
 2. Install an NVMe SSD.
-3. Start the computer.
-4. Allow automatic processing to finish.
-5. Review the result and printable report.
-6. Shut down and replace the SSD.
+3. Start Ubuntu.
+4. Manually start the SSD testing application.
+5. Allow processing to complete unattended.
+6. Review the results and printable report.
+7. Shut down and replace the SSD.
 
 ## 6. Constraints
 
 - One SSD processed at a time.
 - Ubuntu system drive must never be erased.
-- No user interaction during normal processing.
+- Manual initiation required for each SSD.
+- No user interaction required after processing begins.
 - No cloud connectivity required.
 - Results stored locally on Ubuntu.
 - SSD exchange performed with computer powered off.

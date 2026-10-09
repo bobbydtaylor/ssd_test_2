@@ -3,7 +3,9 @@
 
 ## 1. Overview
 
-A Python application running on Ubuntu automates NVMe SSD identification, diagnostics, secure erasure, verification, and reporting.
+A Python application running on Ubuntu performs NVMe SSD identification, diagnostics, secure erasure, verification, and reporting.
+
+Processing begins only when manually initiated.
 
 ## 2. Platform
 
@@ -28,26 +30,26 @@ Controls the processing sequence, executes Linux utilities, evaluates results, a
 - `lsblk` — Identify block devices.
 - `nvme-cli` — NVMe identification, SMART information, diagnostics, and secure erase.
 - `smartmontools` — SMART diagnostics and SSD self-tests.
-- `systemd` — Automatic startup.
 
 ## 4. Processing Sequence
 
-1. Identify installed storage devices.
-2. Identify the Ubuntu system drive.
-3. Identify the NVMe test drive.
-4. Read model, serial number, and capacity.
-5. Check whether the SSD was previously processed.
-6. Collect SMART information.
-7. Evaluate SSD health.
-8. Execute supported diagnostic self-tests.
-9. Evaluate diagnostic results.
-10. Determine the supported secure erase command.
-11. Execute secure erase.
-12. Verify erase completion.
-13. Collect final SMART information.
-14. Determine PASS, FAIL, or REVIEW status.
-15. Save results and generate printable report.
-16. Exit.
+1. Operator manually starts the application.
+2. Identify installed storage devices.
+3. Identify the Ubuntu system drive.
+4. Identify the NVMe test drive.
+5. Read model, serial number, and capacity.
+6. Check whether the SSD was previously processed.
+7. Collect SMART information.
+8. Evaluate SSD health.
+9. Execute supported diagnostic self-tests.
+10. Evaluate diagnostic results.
+11. Determine the supported secure erase command.
+12. Execute secure erase.
+13. Verify erase completion.
+14. Collect final SMART information.
+15. Determine PASS, FAIL, or REVIEW status.
+16. Save results and generate the printable report.
+17. Exit.
 
 ## 5. System Drive Protection
 
@@ -138,7 +140,7 @@ Generate a printable report for each SSD containing:
 
 Store reports and diagnostic logs on the Ubuntu SATA system drive.
 
-The printable report format and generation method are not yet selected.
+The printable report format and generation method have not yet been selected.
 
 ## 10. Error Handling
 
@@ -151,15 +153,12 @@ The printable report format and generation method are not yet selected.
 
 ## 11. Execution
 
-### Development
-
-Run `ssd_test.py` manually from the VS Code terminal.
-
-### Production
-
-A `systemd` service starts `ssd_test.py` automatically when Ubuntu boots.
-
-The application processes the installed NVMe SSD and exits when finished.
+- Operator manually starts `ssd_test.py` from Ubuntu.
+- Application runs unattended after initiation.
+- Application processes the installed NVMe SSD.
+- Application saves the results and printable report.
+- Application exits when processing finishes.
+- No automatic startup service is used.
 
 ## 12. Implementation Sequence
 
@@ -172,8 +171,7 @@ The application processes the installed NVMe SSD and exits when finished.
 7. Implement CSV reporting.
 8. Implement printable SSD reports.
 9. Validate complete operation.
-10. Configure automatic startup.
-11. Test unattended execution.
+10. Test manually initiated unattended execution.
 
 ## 13. Design Principles
 
