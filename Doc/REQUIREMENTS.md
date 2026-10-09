@@ -1,75 +1,59 @@
-
 # SSD Test and Sanitization — Requirements
 
 ## 1. Purpose
 
-Automate testing and secure erasure of used NVMe SSDs recovered from retired computers for resale.
+Automate testing and sanitization of used NVMe SSDs recovered from DMK computers for resale.
 
 ## 2. Hardware
 
-- Computer: Lenovo ThinkCentre M910q Tiny
-- Operating system: Ubuntu Linux
-- System drive: Internal SATA SSD
-- Test drive: M.2 NVMe SSD
-- Initial inventory: 9 Samsung NVMe SSDs
+- Host: Lenovo ThinkCentre M910q Tiny running Ubuntu Linux
+- Ubuntu system drive: SATA SSD
+- Test drive: one M.2 NVMe SSD
+- Initial inventory: nine Samsung NVMe SSDs
 
 ## 3. Functional Requirements
 
-- REQ-01: Process one NVMe SSD per execution.
-- REQ-02: Start processing manually from Ubuntu.
-- REQ-03: Operate unattended after manual initiation.
-- REQ-04: Automatically identify the test SSD by model, serial number, and capacity.
-- REQ-05: Protect the Ubuntu system drive from erasure.
-- REQ-06: Collect SMART health information.
-- REQ-07: Record power-on hours, percentage used, available spare, critical warnings, and media errors.
-- REQ-08: Perform supported SSD diagnostic self-tests.
-- REQ-09: Securely erase the SSD using a supported NVMe command.
-- REQ-10: Verify successful completion of the erase operation.
-- REQ-11: Verify SSD accessibility and health after erasure.
-- REQ-12: Stop processing the current SSD when an operation fails.
-- REQ-13: Maintain a CSV inventory of processed SSDs.
-- REQ-14: Record PASS, FAIL, or REVIEW status.
-- REQ-15: Prevent repeated processing of previously completed SSDs.
-- REQ-16: Save diagnostic results and error information.
-- REQ-17: Support repeated operation with different SSDs without software reconfiguration.
-- REQ-18: Generate an individual printable report for each SSD.
-- REQ-19: Include SSD identification, tests performed, test results, and health information in the printable report.
-- REQ-20: Document the secure erase method and completion status.
-- REQ-21: Identify whether the SSD passed all required tests and was successfully securely erased.
-- REQ-22: Do not start SSD processing automatically when Ubuntu boots.
+- REQ-01: Start processing manually; continue unattended after initiation.
+- REQ-02: Identify the installed SSD by model, serial number, firmware version, and capacity.
+- REQ-03: Select the drive-specific PSID from a local inventory by electronic serial number.
+- REQ-04: Refuse destructive operations unless the serial number, model, and 32-character PSID are present and consistent with the inventory.
+- REQ-05: Exclude the Ubuntu system drive from destructive operations.
+- REQ-06: Refuse an ambiguous or mounted target or one used as swap.
+- REQ-07: Record initial SMART health and conduct an NVMe short self-test.
+- REQ-08: Overwrite all host-accessible logical storage with zeros.
+- REQ-09: Verify zero overwrite using read-back samples distributed across the device; record the amount verified.
+- REQ-10: Execute TCG Opal PSID Revert after overwrite verification.
+- REQ-11: Check PSID Revert reported completion and post-revert security state.
+- REQ-12: Record post-revert SMART information and partition inspection.
+- REQ-13: Produce a printable PDF report and processing log for each SSD.
+- REQ-14: Maintain a CSV summary of processed SSDs.
+- REQ-15: Record PASS or FAIL with reasons. Refuse unknown or unsupported configurations.
+- REQ-16: Do not automatically reprocess a serial number with an existing report.
+- REQ-17: Do not start at boot.
 
 ## 4. Acceptance Criteria
 
-An SSD receives PASS when:
+PASS requires:
 
-- Device identification succeeds.
-- SMART critical warnings equal zero.
-- Media and data integrity errors equal zero.
-- Available spare exceeds the manufacturer's threshold.
-- Required diagnostic tests pass.
-- Secure erase completes successfully.
-- Post-erase verification succeeds.
+- Device model and serial match the inventory.
+- SMART critical warnings and media errors are zero, and available spare exceeds threshold.
+- NVMe short self-test passes.
+- Complete host-visible zero overwrite succeeds.
+- Distributed zero read-back samples pass.
+- TCG Opal PSID Revert reports success.
+- Post-revert device remains accessible and Opal locking is disabled.
+- Final SMART health checks pass.
 
-An SSD receives FAIL when a required operation fails or a health acceptance criterion is not met.
+## 5. Operation
 
-An SSD receives REVIEW when required diagnostic information is unavailable or results are inconclusive.
-
-## 5. Operating Procedure
-
-1. Shut down the computer.
-2. Install an NVMe SSD.
-3. Start Ubuntu.
-4. Manually start the SSD testing application.
-5. Allow processing to complete unattended.
-6. Review the results and printable report.
-7. Shut down and replace the SSD.
+1. Install one SSD with power off.
+2. Boot Ubuntu and manually start the application.
+3. Allow the diagnostic, overwrite, verification, and PSID Revert sequence to finish.
+4. Review the PDF report and exchange the SSD after shutdown.
 
 ## 6. Constraints
 
-- One SSD processed at a time.
-- Ubuntu system drive must never be erased.
-- Manual initiation required for each SSD.
-- No user interaction required after processing begins.
-- No cloud connectivity required.
-- Results stored locally on Ubuntu.
-- SSD exchange performed with computer powered off.
+- One NVMe SSD per run.
+- Drive-specific PSIDs must be confirmed in the inventory.
+- The system drive must never be an erase target.
+- Reports and inventory remain on the Ubuntu SATA system drive.
