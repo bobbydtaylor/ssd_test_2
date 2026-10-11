@@ -1,17 +1,18 @@
 
-# DMK SSD Testing and Sanitization
+# AllyTech LLC — SSD Testing and Sanitization
 
-Python application for testing, overwriting, sanitizing, and documenting used NVMe SSDs recovered from DMK computers.
-
-The application starts manually and processes one SSD unattended.
+Python application for testing, sanitizing, verifying, and documenting Samsung NVMe SSDs recovered from client computer hardware.
 
 ## Platform
 
 - Lenovo ThinkCentre M910q Tiny
 - Ubuntu Linux
 - Python 3.14
-- M.2 NVMe test SSD
-- Internal SATA system SSD
+- Internal SATA Ubuntu system SSD
+- Onboard M.2 NVMe test slot
+- Samsung PM961 and PM981 SSDs
+
+USB-connected SSD processing is not supported.
 
 ## Installation
 
@@ -19,10 +20,10 @@ Install Linux dependencies:
 
 ```bash
 sudo apt update
-sudo apt install nvme-cli sedutil smartmontools parted util-linux
+sudo apt install nvme-cli sedutil smartmontools parted util-linux coreutils
 ```
 
-Install Python dependencies from the repository root:
+Install Python dependencies:
 
 ```bash
 .venv/bin/python -m pip install -r App/requirements.txt
@@ -34,22 +35,25 @@ Source inventory:
 
 `App/ssd_inventory.csv`
 
-The inventory contains the electronic serial number, model, capacity, and PSID for each SSD.
+Required columns:
 
-The application matches the installed SSD against this inventory before processing.
+- `serial`
+- `model`
+- `capacity_gb`
 
-An SSD without a recorded valid PSID cannot complete the PSID Revert procedure.
+The existing `psid` column may remain. It is not required by the current Opal processing method.
 
-## Operation
+## Operating Procedure
 
 1. Shut down Ubuntu.
-2. Install the SSD in the M.2 NVMe slot.
-3. Boot Ubuntu.
-4. Open a terminal in the project root.
-5. Run the read-only preflight.
-6. Start the full processing operation.
-7. Review the report after completion.
-8. Shut down and replace the SSD.
+2. Disconnect power.
+3. Install one SSD in the onboard M.2 NVMe slot.
+4. Reconnect power and boot Ubuntu.
+5. Open a terminal in the project root.
+6. Run preflight.
+7. Start processing.
+8. Review the report.
+9. Shut down before replacing the SSD.
 
 ### Preflight
 
@@ -57,48 +61,78 @@ An SSD without a recorded valid PSID cannot complete the PSID Revert procedure.
 sudo .venv/bin/python App/ssd_test.py
 ```
 
-### Start Processing
+### Full Processing
 
 ```bash
 sudo .venv/bin/python App/ssd_test.py --execute
 ```
 
-Processing includes:
+### Reprocess a Previously Tested SSD
 
-1. SSD identification and inventory matching.
-2. SMART diagnostics.
-3. NVMe short self-test.
-4. Full logical-device zero overwrite.
-5. Distributed overwrite verification.
-6. TCG Opal PSID Revert.
-7. Post-revert checks.
-8. PDF and CSV report generation.
+```bash
+sudo .venv/bin/python App/ssd_test.py --execute --retry
+```
+
+The `--retry` option archives the existing report before starting another processing attempt.
+
+## Processing Sequence
+
+1. Identify and validate the installed SSD.
+2. Confirm the Ubuntu system drive is excluded.
+3. Read SMART information.
+4. Run NVMe short self-test.
+5. Perform complete logical zero overwrite.
+6. Verify every host-accessible byte against zero.
+7. Confirm TCG Opal support.
+8. Initialize Opal using a temporary password.
+9. Execute authenticated `revertTPer`.
+10. Verify the resulting Opal security state.
+11. Collect final health information.
+12. Generate reports and update the processing summary.
+
+## Result Classification
+
+| Result | Meaning |
+|---|---|
+| PASS | Health, logical sanitization, and Opal Revert passed. |
+| CLEAR_ONLY | Logical sanitization passed; Opal processing did not fully pass. |
+| FAIL | Health or logical sanitization failed. |
+| INCOMPLETE | Processing could not be fully evaluated. |
+
+Logical clearing and Opal firmware reset results are recorded separately.
+
+The application does not automatically certify NIST Purge.
 
 ## Reports
 
-Results are stored in:
-
-`Reports/`
-
-The summary CSV is:
-
-`Reports/inventory.csv`
-
-Each SSD receives:
+Current reports:
 
 ```text
-Reports/<SERIAL_NUMBER>/
-├── report.pdf
-└── execution.log
+Reports/
+├── inventory.csv
+└── <SERIAL_NUMBER>/
+    ├── report.pdf
+    ├── execution.log
+    └── dd.log
 ```
 
-## Software Tests
+When an Opal operation requires manual recovery, the directory may also contain:
 
-Run from the repository root:
+`opal_recovery.txt`
+
+This file contains a temporary Opal administrator password. Keep it private and do not include it in resale documentation.
+
+Previous reports from explicit retries are stored under:
+
+`Reports/_archive/`
+
+## Software Tests
 
 ```bash
 .venv/bin/python -m unittest discover -s Tests -v
 ```
+
+Unit tests do not replace hardware validation.
 
 ## Documentation
 

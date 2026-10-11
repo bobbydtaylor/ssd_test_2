@@ -1,0 +1,3 @@
+timestamp,serial,model,capacity_bytes,status,zero_overwrite,sample_verification,psid_revert,media_errors,percentage_used
+2026-10-11T01:11:32.550979+00:00,S41GNX0M357746,SAMSUNG MZVLB256HAHQ-000L7,256060514304,PASS,"PASS, 256060514304 bytes; 734.1 seconds","PASS, 33554432 bytes (32 samples, 1 MiB each)",PASS (revertTper completed successfully),0,
+2026-10-11T21:54:17.451645+00:00,S35ENX0J499755,SAMSUNG MZVLW256HEHP-000L7,256060514304,FAIL,"PASS, 256060514304 bytes; 802.5 seconds","PASS, 33554432 bytes (32 samples, 1 MiB each)",NOT RUN,0,

@@ -4,64 +4,46 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_PATH = ROOT / "App" / "ssd_test.py"
+APP = ROOT / "App" / "ssd_test.py"
 
 spec = importlib.util.spec_from_file_location(
-    "ssd_test", APP_PATH
+    "ssd_test", APP
 )
+
 ssd_test = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ssd_test)
 
 
-class TestSSDInventory(unittest.TestCase):
+class TestInventory(unittest.TestCase):
 
-    def test_valid_psid(self):
-        self.assertTrue(
-            ssd_test.valid_psid("A1B2C3D4" * 4)
-        )
+    def test_inventory_without_psid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "inventory.csv"
 
-    def test_invalid_psid(self):
-        self.assertFalse(ssd_test.valid_psid(""))
-        self.assertFalse(ssd_test.valid_psid("ABC123"))
-        self.assertFalse(
-            ssd_test.valid_psid("INVALID-CHARACTERS-123456789012")
-        )
-
-    def test_inventory_loading(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "ssd_inventory.csv"
-
-            with path.open("w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "serial", "model",
-                    "capacity_gb", "psid"
-                ])
-                writer.writerow([
-                    "TEST123",
-                    "TEST-MODEL",
-                    "256",
-                    "A1B2C3D4" * 4
-                ])
-
-            inventory = ssd_test.load_inventory(path)
-
-            self.assertIn("TEST123", inventory)
-            self.assertEqual(
-                inventory["TEST123"]["model"],
-                "SAMSUNG TEST-MODEL"
-            )
-            self.assertEqual(
-                inventory["TEST123"]["capacity_gb"],
-                "256"
+            path.write_text(
+                "serial,model,capacity_gb,psid\n"
+                "TEST123,MZVLW128HEGR-000L1,128,\n"
             )
 
-    def test_duplicate_serial_rejected(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "ssd_inventory.csv"
+            result = ssd_test.load_inventory(path)
+
+            self.assertEqual(
+                result["TEST123"]["model"],
+                "SAMSUNG MZVLW128HEGR-000L1",
+            )
+
+            self.assertEqual(
+                result["TEST123"]["psid"],
+                "",
+            )
+
+    def test_duplicate_serial(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "inventory.csv"
 
             path.write_text(
                 "serial,model,capacity_gb,psid\n"
@@ -72,88 +54,285 @@ class TestSSDInventory(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 ssd_test.load_inventory(path)
 
+    def test_missing_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "inventory.csv"
 
-class TestSSDHealth(unittest.TestCase):
+            path.write_text(
+                "serial,model,capacity_gb,psid\n"
+                "TEST123,,256,\n"
+            )
 
-    def test_healthy_drive(self):
-        data = {
+            with self.assertRaises(RuntimeError):
+                ssd_test.load_inventory(path)
+
+
+class TestHealth(unittest.TestCase):
+
+    def setUp(self):
+        self.healthy = {
             "critical_warning": 0,
             "media_errors": 0,
             "avail_spare": 100,
             "spare_thresh": 10,
         }
 
-        self.assertTrue(ssd_test.smart_ok(data))
+    def test_healthy(self):
+        self.assertTrue(
+            ssd_test.smart_ok(self.healthy)
+        )
 
     def test_media_errors(self):
-        data = {
-            "critical_warning": 0,
-            "media_errors": 1,
-            "avail_spare": 100,
-            "spare_thresh": 10,
-        }
+        data = dict(self.healthy)
+        data["media_errors"] = 1
 
         self.assertFalse(ssd_test.smart_ok(data))
 
     def test_critical_warning(self):
-        data = {
-            "critical_warning": 1,
-            "media_errors": 0,
-            "avail_spare": 100,
-            "spare_thresh": 10,
-        }
+        data = dict(self.healthy)
+        data["critical_warning"] = 1
 
         self.assertFalse(ssd_test.smart_ok(data))
 
-    def test_insufficient_spare(self):
-        data = {
-            "critical_warning": 0,
-            "media_errors": 0,
-            "avail_spare": 10,
-            "spare_thresh": 10,
-        }
+    def test_spare_threshold(self):
+        data = dict(self.healthy)
+        data["avail_spare"] = 10
 
         self.assertFalse(ssd_test.smart_ok(data))
 
-    def test_missing_smart_fields(self):
+    def test_missing_fields(self):
         self.assertFalse(ssd_test.smart_ok({}))
 
 
-class TestDeviceMounts(unittest.TestCase):
+class TestSelfTestParsing(unittest.TestCase):
 
-    def test_unmounted_disk(self):
-        disk = {
-            "name": "nvme0n1",
+    def test_pass(self):
+        output = """
+Current operation : 0
+Current Completion: 0%
+Self Test Result[0]:
+    Operation Result : 0
+    Self Test Code    : 1
+"""
+        self.assertTrue(
+            ssd_test.parse_self_test(output)
+        )
+
+    def test_running(self):
+        output = """
+Current operation : 1
+Current Completion: 50%
+"""
+        self.assertFalse(
+            ssd_test.parse_self_test(output)
+        )
+
+    def test_failure(self):
+        output = """
+Current operation : 0
+Self Test Result[0]:
+    Operation Result : 5
+    Self Test Code    : 1
+"""
+        with self.assertRaises(RuntimeError):
+            ssd_test.parse_self_test(output)
+
+    def test_wrong_test_code(self):
+        output = """
+Current operation : 0
+Self Test Result[0]:
+    Operation Result : 0
+    Self Test Code    : 2
+"""
+        with self.assertRaises(RuntimeError):
+            ssd_test.parse_self_test(output)
+
+
+class TestMountDetection(unittest.TestCase):
+
+    def test_unmounted(self):
+        device = {
             "mountpoints": [None],
             "children": [
-                {
-                    "name": "nvme0n1p1",
-                    "mountpoints": [None]
-                }
-            ]
+                {"mountpoints": [None]}
+            ],
         }
 
         self.assertEqual(
-            list(ssd_test.tree_mounts(disk)),
-            []
+            list(ssd_test.tree_mounts(device)),
+            [],
         )
 
-    def test_mounted_partition(self):
-        disk = {
-            "name": "sda",
+    def test_mounted(self):
+        device = {
             "mountpoints": [None],
             "children": [
-                {
-                    "name": "sda2",
-                    "mountpoints": ["/"]
-                }
-            ]
+                {"mountpoints": ["/"]}
+            ],
         }
 
         self.assertEqual(
-            list(ssd_test.tree_mounts(disk)),
-            ["/"]
+            list(ssd_test.tree_mounts(device)),
+            ["/"],
         )
+
+
+class TestOpal(unittest.TestCase):
+
+    def test_supported(self):
+        text = """
+LockingSupported = Y
+MediaEncrypt = Y
+OPAL 2.0 function (0x0203)
+"""
+        self.assertTrue(
+            ssd_test.opal_capabilities(text)
+        )
+
+    def test_unsupported(self):
+        self.assertFalse(
+            ssd_test.opal_capabilities(
+                "LockingSupported = N"
+            )
+        )
+
+    def test_reset_state(self):
+        text = """
+Locked = N, LockingEnabled = N
+MBRDone = N, MBREnabled = N
+"""
+        self.assertTrue(
+            ssd_test.opal_reset_state(text)
+        )
+
+    def test_enabled_locking_rejected(self):
+        text = """
+Locked = N, LockingEnabled = Y
+MBRDone = N, MBREnabled = N
+"""
+        self.assertFalse(
+            ssd_test.opal_reset_state(text)
+        )
+
+
+class TestFullVerification(unittest.TestCase):
+
+    def test_zero_device(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "device.bin"
+            path.write_bytes(bytes(1024 * 1024))
+
+            checked, elapsed = (
+                ssd_test.verify_zeroes(
+                    path,
+                    path.stat().st_size,
+                    lambda message: None,
+                )
+            )
+
+            self.assertEqual(
+                checked, 1024 * 1024
+            )
+            self.assertGreaterEqual(
+                elapsed, 0
+            )
+
+    def test_nonzero_device(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "device.bin"
+            path.write_bytes(
+                bytes(512) + b"\x01" + bytes(512)
+            )
+
+            with self.assertRaises(RuntimeError):
+                ssd_test.verify_zeroes(
+                    path,
+                    path.stat().st_size,
+                    lambda message: None,
+                )
+
+    def test_short_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "device.bin"
+            path.write_bytes(bytes(100))
+
+            with self.assertRaises(RuntimeError):
+                ssd_test.verify_zeroes(
+                    path,
+                    200,
+                    lambda message: None,
+                )
+
+
+class TestRecoveryCredential(unittest.TestCase):
+
+    def test_create_recovery_password(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+
+            path = ssd_test.save_recovery_password(
+                folder, "test-password"
+            )
+
+            self.assertEqual(
+                path.read_text(),
+                "test-password\n",
+            )
+
+            self.assertEqual(
+                path.stat().st_mode & 0o777,
+                0o600,
+            )
+
+    def test_no_credential_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+
+            ssd_test.save_recovery_password(
+                folder, "first"
+            )
+
+            with self.assertRaises(FileExistsError):
+                ssd_test.save_recovery_password(
+                    folder, "second"
+                )
+
+
+class TestArchiving(unittest.TestCase):
+
+    def test_archive_existing_report(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            with patch.object(
+                ssd_test, "REPORTS", root
+            ):
+                source = root / "SERIAL123"
+                source.mkdir()
+
+                (source / "report.pdf").write_text(
+                    "previous report"
+                )
+
+                ssd_test.archive_existing(
+                    "SERIAL123"
+                )
+
+                self.assertFalse(
+                    source.exists()
+                )
+
+                files = list(
+                    (root / "_archive").glob(
+                        "SERIAL123_*/report.pdf"
+                    )
+                )
+
+                self.assertEqual(len(files), 1)
+                self.assertEqual(
+                    files[0].read_text(),
+                    "previous report",
+                )
 
 
 if __name__ == "__main__":

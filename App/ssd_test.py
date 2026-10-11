@@ -1,5 +1,7 @@
+
 #!/usr/bin/env python3
-"""DMK SSD diagnostic, host-accessible overwrite and Opal PSID revert utility."""
+"""AllyTech LLC NVMe SSD testing and sanitization utility."""
+
 import argparse
 import csv
 import datetime as dt
@@ -7,274 +9,875 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import time
 
 BASE = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE.parent
-
+ROOT = BASE.parent
 INVENTORY = BASE / "ssd_inventory.csv"
-REPORTS = PROJECT_ROOT / "Reports"
-REQUIRED = ("nvme", "sedutil-cli", "dd", "lsblk", "findmnt", "blockdev", "parted")
+REPORTS = ROOT / "Reports"
+
+REQUIRED = (
+    "nvme",
+    "sedutil-cli",
+    "dd",
+    "lsblk",
+    "blockdev",
+    "parted",
+    "swapon",
+)
+
+CSV_FIELDS = [
+    "timestamp",
+    "serial",
+    "model",
+    "firmware",
+    "capacity_bytes",
+    "status",
+    "sanitization_category",
+    "zero_overwrite",
+    "full_verification",
+    "opal_initialization",
+    "opal_revert",
+    "opal_verification",
+    "self_test",
+    "media_errors",
+    "percentage_used",
+    "error",
+]
 
 
-def cmd(argv, timeout=60, check=True):
-    p = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
-    if check and p.returncode:
-        raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(argv)}\n{p.stdout}\n{p.stderr}")
-    return p
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def valid_psid(value):
-    return bool(re.fullmatch(r"[A-Z0-9]{32}", value or ""))
+def cmd(argv, timeout=60, check=True, secret=None):
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Command timeout: {argv[0]}"
+        ) from None
+
+    if check and result.returncode:
+        output = (result.stdout + result.stderr).strip()
+        if secret:
+            output = output.replace(secret, "[REDACTED]")
+        raise RuntimeError(
+            f"{argv[0]} failed ({result.returncode}): {output}"
+        )
+
+    return result
 
 
 def load_inventory(path=INVENTORY):
-    with path.open(newline="") as f:
-        rows = list(csv.DictReader(f))
-    seen = set()
+    with path.open(newline="") as file:
+        rows = list(csv.DictReader(file))
+
+    if not rows:
+        raise RuntimeError("SSD inventory is empty")
+
+    required = {"serial", "model", "capacity_gb"}
+    if not required.issubset(rows[0]):
+        raise RuntimeError("SSD inventory columns missing")
+
+    inventory = {}
+
     for row in rows:
-        sn = row["serial"].strip().upper()
-        if not sn or sn in seen:
-            raise RuntimeError("Duplicate or empty serial in inventory: " + sn)
-        seen.add(sn)
-        row["serial"] = sn
-        row["psid"] = row["psid"].strip().upper()
-        row["model"] = row["model"].strip().upper()
-        if not row["model"].startswith("SAMSUNG "):row["model"] = "SAMSUNG " + row["model"]
-    return {row["serial"]: row for row in rows}
+        serial = row["serial"].strip().upper()
+        model = row["model"].strip().upper()
+
+        if not serial or serial in inventory:
+            raise RuntimeError(
+                "Empty or duplicate inventory serial: " + serial
+            )
+
+        if not model:
+            raise RuntimeError(
+                "Missing inventory model for " + serial
+            )
+
+        if not model.startswith("SAMSUNG "):
+            model = "SAMSUNG " + model
+
+        row["serial"] = serial
+        row["model"] = model
+        row["psid"] = (row.get("psid") or "").strip().upper()
+
+        inventory[serial] = row
+
+    return inventory
 
 
 def disks():
-    data = json.loads(cmd(["lsblk", "-J", "-o", "NAME,PATH,TYPE,MOUNTPOINTS"]).stdout)
-    return data.get("blockdevices", [])
+    result = cmd([
+        "lsblk", "-J", "-o",
+        "NAME,PATH,TYPE,MOUNTPOINTS,TRAN",
+    ])
+
+    return json.loads(result.stdout)["blockdevices"]
 
 
-def tree_mounts(item):
-    for mount in (item.get("mountpoints") or []):
+def tree_mounts(device):
+    for mount in device.get("mountpoints") or []:
         if mount:
             yield mount
-    for child in (item.get("children") or []):
+
+    for child in device.get("children") or []:
         yield from tree_mounts(child)
 
 
 def identify_target():
     all_disks = disks()
-    system_disks = {d["path"] for d in all_disks if any(m in ("/", "/boot", "/boot/efi") for m in tree_mounts(d))}
+
+    system_disks = {
+        disk["path"]
+        for disk in all_disks
+        if any(
+            mount in ("/", "/boot", "/boot/efi")
+            for mount in tree_mounts(disk)
+        )
+    }
+
     if not system_disks:
-        raise RuntimeError("Could not identify system disk; refusing operation")
-    candidates = [d for d in all_disks if d.get("type") == "disk" and re.fullmatch(r"nvme\d+n\d+", d.get("name", ""))]
+        raise RuntimeError(
+            "Cannot identify Ubuntu system disk"
+        )
+
+    candidates = [
+        disk
+        for disk in all_disks
+        if disk.get("type") == "disk"
+        and re.fullmatch(
+            r"nvme\d+n\d+",
+            disk.get("name", ""),
+        )
+        and disk.get("tran") == "nvme"
+    ]
+
     if len(candidates) != 1:
-        raise RuntimeError(f"Expected one NVMe namespace; found {len(candidates)}")
+        raise RuntimeError(
+            f"Expected one onboard NVMe SSD; "
+            f"found {len(candidates)}"
+        )
+
     disk = candidates[0]
     path = disk["path"]
-    if path in system_disks or any(tree_mounts(disk)):
-        raise RuntimeError("Target SSD or partitions mounted; refusing operation")
-    swaps = cmd(["swapon", "--show=NAME", "--noheadings"], check=False).stdout
-    if re.search(re.escape(path) + r"(p\d+)?(?:\s|$)", swaps):
-        raise RuntimeError("NVMe drive is active swap")
+
+    if path in system_disks:
+        raise RuntimeError(
+            "NVMe target is the Ubuntu system drive"
+        )
+
+    if any(tree_mounts(disk)):
+        raise RuntimeError(
+            "NVMe target or partition is mounted"
+        )
+
+    swap = cmd(
+        ["swapon", "--show=NAME", "--noheadings"]
+    ).stdout.splitlines()
+
+    for entry in swap:
+        name = entry.strip()
+        if name == path or re.fullmatch(
+            re.escape(path) + r"p\d+", name
+        ):
+            raise RuntimeError(
+                "NVMe target is active swap"
+            )
+
     controller = re.sub(r"n\d+$", "", path)
+
     if not Path(controller).exists():
-        raise RuntimeError("NVMe controller missing")
+        raise RuntimeError(
+            "NVMe controller device missing"
+        )
+
     return path, controller
 
 
 def ctrl_identity(controller):
-    data = json.loads(cmd(["nvme", "id-ctrl", controller, "-o", "json"]).stdout)
-    def txt(k):
-        return str(data.get(k, "")).strip().upper()
-    return {"serial": txt("sn"), "model": txt("mn"), "firmware": txt("fr"), "oacs": int(data.get("oacs", 0))}
+    output = cmd([
+        "nvme", "id-ctrl", controller,
+        "-o", "json",
+    ]).stdout
+
+    data = json.loads(output)
+
+    def value(key):
+        return str(data.get(key, "")).strip().upper()
+
+    return {
+        "serial": value("sn"),
+        "model": value("mn"),
+        "firmware": value("fr"),
+        "oacs": int(data.get("oacs", 0)),
+    }
 
 
 def smart(controller):
-    return json.loads(cmd(["nvme", "smart-log", controller, "-o", "json"]).stdout)
+    output = cmd([
+        "nvme", "smart-log", controller,
+        "-o", "json",
+    ]).stdout
+
+    return json.loads(output)
+
 
 def smart_ok(data):
     try:
         return (
             int(data["critical_warning"]) == 0
             and int(data["media_errors"]) == 0
-            and int(data["avail_spare"]) > int(data["spare_thresh"])
+            and int(data["avail_spare"])
+            > int(data["spare_thresh"])
         )
     except (KeyError, TypeError, ValueError):
         return False
 
 
+def parse_self_test(text):
+    operation = re.search(
+        r"Current operation\s*:\s*(\d+)",
+        text,
+        re.I,
+    )
+
+    if not operation:
+        raise RuntimeError(
+            "Cannot parse self-test operation status"
+        )
+
+    if int(operation.group(1)) != 0:
+        return False
+
+    match = re.search(
+        r"Self Test Result\[0\]:(.*?)(?:"
+        r"Self Test Result\[1\]:|\Z)",
+        text,
+        re.I | re.S,
+    )
+
+    if not match:
+        raise RuntimeError(
+            "Latest self-test result missing"
+        )
+
+    section = match.group(1)
+
+    result = re.search(
+        r"Operation Result\s*:\s*"
+        r"(0x[0-9a-f]+|\d+)",
+        section,
+        re.I,
+    )
+
+    kind = re.search(
+        r"Self Test Code\s*:\s*(\d+)",
+        section,
+        re.I,
+    )
+
+    if not result or not kind:
+        raise RuntimeError(
+            "Cannot parse latest self-test result"
+        )
+
+    if (
+        int(result.group(1), 0) != 0
+        or int(kind.group(1)) != 1
+    ):
+        raise RuntimeError(
+            "NVMe short self-test failed"
+        )
+
+    return True
+
+
 def short_test(controller, log):
     log("Starting NVMe short self-test")
-    cmd(["nvme", "device-self-test", controller, "--self-test-code=1"])
-    until = time.monotonic() + 900
-    while time.monotonic() < until:
+
+    cmd([
+        "nvme", "device-self-test",
+        controller, "--self-test-code=1",
+    ])
+
+    deadline = time.monotonic() + 900
+
+    while time.monotonic() < deadline:
         time.sleep(15)
-        result = cmd(["nvme", "self-test-log", controller], timeout=60).stdout
-        current = re.search(r"Current operation\s*:\s*(\d+)", result, re.I)
-        completion = re.search(r"Current Completion:\s*(\d+)%", result, re.I)
-        if current and current.group(1) == "0":
-            section = result.split("Self Test Result[0]:", 1)
-            if len(section) != 2:
-                raise RuntimeError("Could not parse latest self-test result")
-            code = re.search(r"Operation Result\s*:\s*(0x[0-9a-f]+|\d+)", section[1], re.I)
-            kind = re.search(r"Self Test Code\s*:\s*(\d+)", section[1], re.I)
-            if not code or int(code.group(1), 0) != 0 or not kind or int(kind.group(1)) != 1:
-                raise RuntimeError("Short self-test did not pass: " + section[1][:300])
+
+        output = cmd([
+            "nvme", "self-test-log", controller
+        ]).stdout
+
+        if parse_self_test(output):
             log("NVMe short self-test PASSED")
             return
-        log("Self-test running " + (completion.group(1) + "%" if completion else ""))
-    raise RuntimeError("Self-test timeout")
+
+    raise RuntimeError(
+        "NVMe short self-test timeout"
+    )
 
 
-def verify_samples(path, size, log):
-    # Sequentially read deterministic, evenly distributed 1 MiB samples.
-    sample_size = min(1024 * 1024, size)
-    offsets = sorted({min(size - sample_size, (size - sample_size) * i // 31) for i in range(32)})
+def verify_zeroes(path, size, log):
+    chunk_size = 8 * 1024 * 1024
+    checked = 0
+    start = time.monotonic()
+
+    log("Starting full-device zero verification")
+
     with open(path, "rb", buffering=0) as disk:
-        for i, off in enumerate(offsets):
-            disk.seek(off)
-            buf = disk.read(sample_size)
-            if len(buf) != sample_size or any(buf):
-                raise RuntimeError(f"Zero verification failed at byte offset {off}")
-    log(f"Overwrite sampling PASSED: {len(offsets)} x {sample_size} bytes across the full device")
-    return len(offsets) * sample_size
+        while checked < size:
+            amount = min(
+                chunk_size, size - checked
+            )
+
+            data = disk.read(amount)
+
+            if len(data) != amount:
+                raise RuntimeError(
+                    "Short read during verification "
+                    f"at byte {checked}"
+                )
+
+            if any(data):
+                raise RuntimeError(
+                    "Nonzero data found at or after "
+                    f"byte {checked}"
+                )
+
+            checked += amount
+
+    elapsed = time.monotonic() - start
+
+    log(
+        f"Full zero verification PASSED: "
+        f"{checked} bytes; {elapsed:.1f} seconds"
+    )
+
+    return checked, elapsed
 
 
-def reports(serial, data, lines):
+def opal_capabilities(text):
+    return (
+        "OPAL 2.0 function" in text
+        and "LockingSupported = Y" in text
+        and "MediaEncrypt = Y" in text
+    )
+
+
+def opal_reset_state(text):
+    return all(
+        entry in text
+        for entry in (
+            "Locked = N",
+            "LockingEnabled = N",
+            "MBREnabled = N",
+        )
+    )
+
+
+def save_recovery_password(folder, password):
+    path = folder / "opal_recovery.txt"
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(
+        path, flags, 0o600
+    )
+
+    try:
+        with os.fdopen(descriptor, "w") as file:
+            file.write(password + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+    return path
+
+
+def archive_existing(serial):
+    folder = REPORTS / serial
+
+    if not folder.exists():
+        return
+
+    archive = REPORTS / "_archive"
+    archive.mkdir(parents=True, exist_ok=True)
+
+    stamp = dt.datetime.now(
+        dt.timezone.utc
+    ).strftime("%Y%m%dT%H%M%S%fZ")
+
+    destination = archive / f"{serial}_{stamp}"
+    folder.rename(destination)
+
+
+def write_reports(serial, data, lines):
     folder = REPORTS / serial
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "execution.log").write_text("\n".join(lines) + "\n")
-    try:
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import letter
-    except ImportError:
-        raise RuntimeError("PDF library missing. Run: pip install -r requirements.txt")
-    c = canvas.Canvas(str(folder / "report.pdf"), pagesize=letter)
-    w, h = letter
-    def page():
-        c.setFont("Helvetica-Bold", 15)
-        c.drawString(42, h - 45, "DMK SSD Test and Sanitization Report")
+
+    (folder / "execution.log").write_text(
+        "\n".join(lines) + "\n"
+    )
+
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+
+    pdf = folder / "report.pdf"
+    c = canvas.Canvas(str(pdf), pagesize=letter)
+
+    width, height = letter
+
+    def new_page():
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(
+            40, height - 45,
+            "AllyTech LLC - SSD Test and Sanitization"
+        )
         c.setFont("Helvetica", 9)
-        return h - 73
-    y = page()
+        return height - 75
+
+    y = new_page()
+
     for key, value in data.items():
-        text = f"{key}: {value}"
-        for chunk in [text[i:i + 106] for i in range(0, len(text), 106)]:
-            if y < 52:
-                c.showPage();y = page()
-            c.drawString(42, y, chunk); y -= 16
+        line = f"{key}: {value}"
+
+        chunks = [
+            line[i:i + 105]
+            for i in range(0, len(line), 105)
+        ] or [""]
+
+        for chunk in chunks:
+            if y < 50:
+                c.showPage()
+                y = new_page()
+
+            c.drawString(40, y, chunk)
+            y -= 15
+
     c.save()
-    index_path = REPORTS / "inventory.csv"
-    fields = ["timestamp", "serial", "model", "capacity_bytes", "status", "zero_overwrite", "sample_verification", "psid_revert", "media_errors", "percentage_used"]
-    rows = []
-    if index_path.exists():
-        with index_path.open(newline="") as f:
-            rows = list(csv.DictReader(f))
-    rows = [r for r in rows if r["serial"] != serial]
-    rows.append({field: str(data.get(field, "")) for field in fields})
-    with index_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
-    return folder
 
-
-def process(execute=False):
-    inventory = load_inventory()
-    path, ctrl = identify_target()
-    ident = ctrl_identity(ctrl)
-    serial = ident["serial"]
-    record = inventory.get(serial)
-    if not record or ident["model"] != record["model"]:
-        raise RuntimeError("Serial/model mismatch or device not found in inventory")
-    if not valid_psid(record["psid"]):
-        raise RuntimeError(f"No confirmed 32-character PSID for serial {serial}; refusing operation")
-    size = int(cmd(["blockdev", "--getsize64", path]).stdout.strip())
-    before = smart(ctrl)
-    print(f"TARGET: {path} | {ident['model']} | SN {serial} | {size} bytes")
-    print(f"SYSTEM PROTECTION: system drive excluded; target unmounted")
-    if (REPORTS / serial / "report.pdf").exists():
-        raise RuntimeError("This serial already has a completed/attempted report; review before retry")
-    if not execute:
-        print("PREFLIGHT OK. No drive changes performed. Run with --execute to begin.")
-        return
-    if os.geteuid() != 0:
-        raise RuntimeError("Run with sudo for --execute")
-    if not smart_ok(before):
-        raise RuntimeError("SMART health criteria not met")
     REPORTS.mkdir(parents=True, exist_ok=True)
+    index_path = REPORTS / "inventory.csv"
+
+    existing = []
+
+    if index_path.exists():
+        with index_path.open(newline="") as file:
+            existing = list(
+                csv.DictReader(file)
+            )
+
+    existing = [
+        row for row in existing
+        if row.get("serial") != serial
+    ]
+
+    existing.append({
+        field: str(data.get(field, ""))
+        for field in CSV_FIELDS
+    })
+
+    with index_path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file, fieldnames=CSV_FIELDS
+        )
+        writer.writeheader()
+        writer.writerows(existing)
+
+    return pdf
+
+
+def process(execute=False, retry=False):
+    inventory = load_inventory()
+    path, controller = identify_target()
+    identity = ctrl_identity(controller)
+
+    serial = identity["serial"]
+    record = inventory.get(serial)
+
+    if (
+        not record
+        or identity["model"] != record["model"]
+    ):
+        raise RuntimeError(
+            "SSD serial/model does not match inventory"
+        )
+
+    if identity["model"] not in (
+        "SAMSUNG MZVLW256HEHP-000L7",
+        "SAMSUNG MZVLW128HEGR-000L1",
+        "SAMSUNG MZVLB256HAHQ-000L7",
+    ):
+        raise RuntimeError(
+            "SSD model not in supported model list"
+        )
+
+    size = int(cmd([
+        "blockdev", "--getsize64", path
+    ]).stdout.strip())
+
+    expected_gb = int(record["capacity_gb"])
+
+    if abs(size - expected_gb * 1_000_000_000) > (
+        expected_gb * 1_000_000_000 * 0.02
+    ):
+        raise RuntimeError(
+            "SSD capacity does not match inventory"
+        )
+
+    print(
+        f"TARGET: {path} | "
+        f"{identity['model']} | "
+        f"SN {serial} | {size} bytes"
+    )
+
+    print(
+        "SYSTEM PROTECTION: system drive excluded; "
+        "target unmounted"
+    )
+
+    folder = REPORTS / serial
+
+    if folder.exists() and not retry:
+        raise RuntimeError(
+            "Existing processing record. "
+            "Use --retry for deliberate reprocessing."
+        )
+
+    if not execute:
+        print(
+            "PREFLIGHT OK. No changes performed."
+        )
+        return
+
+    if os.geteuid() != 0:
+        raise RuntimeError(
+            "Run --execute with sudo"
+        )
+
+    if not (identity["oacs"] & (1 << 4)):
+        raise RuntimeError(
+            "NVMe short self-test not supported"
+        )
+
+    before = smart(controller)
+
+    if not smart_ok(before):
+        raise RuntimeError(
+            "Initial SMART health check failed"
+        )
+
+    if retry:
+        archive_existing(serial)
+
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
+
     lines = []
-    def log(s):
-        line = f"{dt.datetime.now(dt.timezone.utc).isoformat()} {s}"
-        lines.append(line); print(line, flush=True)
-    data = {"timestamp":dt.datetime.now(dt.timezone.utc).isoformat(), "serial":serial,
-            "model":ident["model"], "firmware":ident["firmware"], "capacity_bytes":size,
-            "zero_overwrite":"NOT RUN", "sample_verification":"NOT RUN", "psid_revert":"NOT RUN",
-            "status":"FAIL", "power_on_hours":before.get("power_on_hours", ""),
-            "percentage_used":before.get("percentage_used", ""), "media_errors":before.get("media_errors", "")}
+
+    def log(message):
+        line = f"{utc_now()} {message}"
+        lines.append(line)
+        print(line, flush=True)
+
+    data = {
+        "timestamp": utc_now(),
+        "serial": serial,
+        "model": identity["model"],
+        "firmware": identity["firmware"],
+        "capacity_bytes": size,
+        "status": "INCOMPLETE",
+        "sanitization_category": "NONE",
+        "self_test": "NOT RUN",
+        "zero_overwrite": "NOT RUN",
+        "full_verification": "NOT RUN",
+        "opal_initialization": "NOT RUN",
+        "opal_revert": "NOT RUN",
+        "opal_verification": "NOT RUN",
+        "power_on_hours": before.get(
+            "power_on_hours", ""
+        ),
+        "percentage_used": before.get(
+            "percentage_used", ""
+        ),
+        "media_errors": before.get(
+            "media_errors", ""
+        ),
+    }
+
+    clear_passed = False
+    password = None
+    recovery_path = None
+
     try:
-        if not (ident["oacs"] & (1 << 4)):
-            raise RuntimeError("NVMe self-test not supported; test policy requires it")
-        short_test(ctrl, log)
-        path2, ctrl2 = identify_target()
-        ident2 = ctrl_identity(ctrl2)
-        if path2 != path or ident2["serial"] != serial or ident2["model"] != ident["model"]:
-            raise RuntimeError("Target changed before overwrite")
+        short_test(controller, log)
+        data["self_test"] = "PASS"
+
+        opal_before = cmd([
+            "sedutil-cli", "--query", path
+        ]).stdout
+
+        if not opal_capabilities(opal_before):
+            raise RuntimeError(
+                "Required TCG Opal 2.0 capability missing"
+            )
+
+        # Revalidate immediately before modifying SSD.
+        new_path, new_controller = identify_target()
+        new_identity = ctrl_identity(new_controller)
+
+        if (
+            new_path != path
+            or new_controller != controller
+            or new_identity["serial"] != serial
+            or new_identity["model"] != identity["model"]
+        ):
+            raise RuntimeError(
+                "Target identity changed"
+            )
+
         log("Starting full logical-device zero overwrite")
-        # Count exact 512-byte sectors: no expected end-of-device ENOSPC.
-        if size % 512:
-            raise RuntimeError("Device capacity not sector aligned")
-        t0=time.monotonic()
-        with open(REPORTS / "_last_dd.log", "w") as out:
-            p=subprocess.run(["dd", "if=/dev/zero",f"of={path}","bs=16M",f"count={size}",
-                              "iflag=count_bytes,fullblock", "oflag=direct", "conv=fsync", "status=progress"],
-                             stdout=out,stderr=subprocess.STDOUT)
-        if p.returncode:
-            raise RuntimeError(f"dd overwrite failed with exit code {p.returncode}")
-        data["zero_overwrite"] = f"PASS, {size} bytes; {time.monotonic()-t0:.1f} seconds"
+        started = time.monotonic()
+
+        dd_log = folder / "dd.log"
+
+        with dd_log.open("w") as output:
+            result = subprocess.run(
+                [
+                    "dd",
+                    "if=/dev/zero",
+                    f"of={path}",
+                    "bs=16M",
+                    f"count={size}",
+                    "iflag=count_bytes,fullblock",
+                    "oflag=direct",
+                    "conv=fsync",
+                    "status=progress",
+                ],
+                stdout=output,
+                stderr=subprocess.STDOUT,
+            )
+
+        if result.returncode:
+            raise RuntimeError(
+                f"Zero overwrite failed: "
+                f"exit code {result.returncode}"
+            )
+
+        elapsed = time.monotonic() - started
+
+        data["zero_overwrite"] = (
+            f"PASS; {size} bytes; "
+            f"{elapsed:.1f} seconds"
+        )
         log(data["zero_overwrite"])
-        bytes_checked = verify_samples(path, size, log)
-        data["sample_verification"] = f"PASS, {bytes_checked} bytes (32 samples, 1 MiB each)"
-        log("Starting Opal PSID Revert")
-        psid_cmd = ["sedutil-cli", "--yesIreallywanttoERASEALLmydatausingthePSID", record["psid"], path]
-        result=cmd(psid_cmd, timeout=300)
-        if "revertTper completed successfully" not in (result.stdout+result.stderr):
-            raise RuntimeError("PSID revert did not report successful completion")
-        data["psid_revert"] = "PASS (revertTper completed successfully)"
-        state=cmd(["sedutil-cli", "--query", path]).stdout
-        for field in ("Locked = N", "LockingEnabled = N"):
-            if field not in state:
-                raise RuntimeError("Post-revert Opal state check failed: " + field)
-        data["opal_security_state"]="Unlocked; locking disabled"
-        partition=cmd(["parted", "-s", path, "print"], check=False)
-        data["partition_inspection"]=(partition.stdout+partition.stderr).strip()[:400]
-        after=smart(ctrl)
+
+        checked, verify_time = verify_zeroes(
+            path, size, log
+        )
+
+        data["full_verification"] = (
+            f"PASS; {checked} bytes; "
+            f"{verify_time:.1f} seconds"
+        )
+
+        clear_passed = True
+        data["sanitization_category"] = "CLEAR"
+        data["status"] = "CLEAR_ONLY"
+
+        log("Starting TCG Opal initialization")
+
+        password = secrets.token_hex(16)
+        recovery_path = save_recovery_password(
+            folder, password
+        )
+
+        initialization = cmd(
+            [
+                "sedutil-cli",
+                "--initialSetup",
+                password,
+                path,
+            ],
+            timeout=300,
+            secret=password,
+        )
+
+        if (
+            "Initial setup of TPer complete"
+            not in initialization.stdout
+            + initialization.stderr
+        ):
+            raise RuntimeError(
+                "Opal initialization did not confirm completion"
+            )
+
+        data["opal_initialization"] = "PASS"
+        log("TCG Opal initialization PASSED")
+
+        log("Starting TCG Opal revertTPer")
+
+        revert = cmd(
+            [
+                "sedutil-cli",
+                "--revertTPer",
+                password,
+                path,
+            ],
+            timeout=300,
+            secret=password,
+        )
+
+        if (
+            "revertTper completed successfully"
+            not in revert.stdout + revert.stderr
+        ):
+            raise RuntimeError(
+                "Opal Revert did not confirm completion"
+            )
+
+        data["opal_revert"] = "PASS"
+        log("TCG Opal revertTPer PASSED")
+
+        after_opal = cmd([
+            "sedutil-cli", "--query", path
+        ]).stdout
+
+        if not opal_reset_state(after_opal):
+            raise RuntimeError(
+                "Post-Revert Opal security state invalid"
+            )
+
+        final_identity = ctrl_identity(controller)
+
+        if (
+            final_identity["serial"] != serial
+            or final_identity["model"] != identity["model"]
+        ):
+            raise RuntimeError(
+                "Device identity mismatch after Revert"
+            )
+
+        data["opal_verification"] = "PASS"
+        log("Post-Revert Opal verification PASSED")
+
+        partition = cmd(
+            ["parted", "-s", path, "print"],
+            check=False,
+        )
+
+        data["partition_inspection"] = (
+            partition.stdout + partition.stderr
+        ).strip()[:400]
+
+        after = smart(controller)
+
         if not smart_ok(after):
-            raise RuntimeError("Post-revert SMART health criteria not met")
-        data["media_errors"] = after.get("media_errors", "")
-        data["percentage_used"] = after.get("percentage_used", "")
+            raise RuntimeError(
+                "Final SMART health check failed"
+            )
+
+        data["media_errors"] = after.get(
+            "media_errors", ""
+        )
+        data["percentage_used"] = after.get(
+            "percentage_used", ""
+        )
+
+        if recovery_path:
+            recovery_path.unlink()
+            recovery_path = None
+
         data["status"] = "PASS"
-        log("All required checks PASSED")
-    except Exception as ex:
-        data["error"] = str(ex)
-        log("FAILED: " + str(ex))
+        log("All required operations PASSED")
+
+    except Exception as exc:
+        error = str(exc)
+
+        if password:
+            error = error.replace(
+                password, "[REDACTED]"
+            )
+
+        data["error"] = error
+
+        if clear_passed:
+            data["status"] = "CLEAR_ONLY"
+        else:
+            data["status"] = "FAIL"
+
+        log("FAILED: " + error)
+
+        if recovery_path and recovery_path.exists():
+            data["recovery_note"] = (
+                "Local Opal recovery credential retained. "
+                "Review before further Opal operations."
+            )
+            log(
+                "Opal recovery credential retained locally"
+            )
+
     finally:
-        folder=reports(serial,data,lines)
-        log("Report saved: " + str(folder / "report.pdf"))
-        print("OVERALL:",data["status"])
+        pdf = write_reports(serial, data, lines)
+        log("Report saved: " + str(pdf))
+        print("OVERALL:", data["status"])
+
     if data["status"] != "PASS":
         raise SystemExit(1)
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--execute",action="store_true",help="Perform irreversible full overwrite and PSID Revert")
-    args=parser.parse_args()
+    parser = argparse.ArgumentParser(
+        description=__doc__
+    )
+
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Execute SSD testing and sanitization",
+    )
+
+    parser.add_argument(
+        "--retry",
+        action="store_true",
+        help="Archive prior report and reprocess SSD",
+    )
+
+    args = parser.parse_args()
+
+    if args.retry and not args.execute:
+        parser.error(
+            "--retry requires --execute"
+        )
+
     for utility in REQUIRED:
         if not shutil.which(utility):
-            raise RuntimeError("Missing Linux utility: " + utility)
-    process(args.execute)
+            raise RuntimeError(
+                "Missing utility: " + utility
+            )
 
-if __name__=="__main__":
+    process(args.execute, args.retry)
+
+
+if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print("ERROR:",exc,file=sys.stderr)
+        print(
+            "ERROR:", exc,
+            file=sys.stderr,
+        )
         sys.exit(1)
