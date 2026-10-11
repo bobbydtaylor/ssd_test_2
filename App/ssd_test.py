@@ -91,11 +91,13 @@ def ctrl_identity(controller):
 def smart(controller):
     return json.loads(cmd(["nvme", "smart-log", controller, "-o", "json"]).stdout)
 
-
 def smart_ok(data):
     try:
-        return (int(data["critical_warning"]) == 0 and int(data["media_errors"]) == 0
-                and int(data["available_spare"]) > int(data["available_spare_threshold"]))
+        return (
+            int(data["critical_warning"]) == 0
+            and int(data["media_errors"]) == 0
+            and int(data["avail_spare"]) > int(data["spare_thresh"])
+        )
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -107,7 +109,7 @@ def short_test(controller, log):
     while time.monotonic() < until:
         time.sleep(15)
         result = cmd(["nvme", "self-test-log", controller], timeout=60).stdout
-        current = re.search(r"Current operation:\s*(\d+)", result, re.I)
+        current = re.search(r"Current operation\s*:\s*(\d+)", result, re.I)
         completion = re.search(r"Current Completion:\s*(\d+)%", result, re.I)
         if current and current.group(1) == "0":
             section = result.split("Self Test Result[0]:", 1)

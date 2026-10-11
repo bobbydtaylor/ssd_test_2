@@ -52,7 +52,7 @@ class TestSSDInventory(unittest.TestCase):
             self.assertIn("TEST123", inventory)
             self.assertEqual(
                 inventory["TEST123"]["model"],
-                "TEST-MODEL"
+                "SAMSUNG TEST-MODEL"
             )
             self.assertEqual(
                 inventory["TEST123"]["capacity_gb"],
@@ -79,8 +79,8 @@ class TestSSDHealth(unittest.TestCase):
         data = {
             "critical_warning": 0,
             "media_errors": 0,
-            "available_spare": 100,
-            "available_spare_threshold": 10,
+            "avail_spare": 100,
+            "spare_thresh": 10,
         }
 
         self.assertTrue(ssd_test.smart_ok(data))
@@ -89,8 +89,8 @@ class TestSSDHealth(unittest.TestCase):
         data = {
             "critical_warning": 0,
             "media_errors": 1,
-            "available_spare": 100,
-            "available_spare_threshold": 10,
+            "avail_spare": 100,
+            "spare_thresh": 10,
         }
 
         self.assertFalse(ssd_test.smart_ok(data))
@@ -99,8 +99,8 @@ class TestSSDHealth(unittest.TestCase):
         data = {
             "critical_warning": 1,
             "media_errors": 0,
-            "available_spare": 100,
-            "available_spare_threshold": 10,
+            "avail_spare": 100,
+            "spare_thresh": 10,
         }
 
         self.assertFalse(ssd_test.smart_ok(data))
@@ -109,8 +109,8 @@ class TestSSDHealth(unittest.TestCase):
         data = {
             "critical_warning": 0,
             "media_errors": 0,
-            "available_spare": 10,
-            "available_spare_threshold": 10,
+            "avail_spare": 10,
+            "spare_thresh": 10,
         }
 
         self.assertFalse(ssd_test.smart_ok(data))
