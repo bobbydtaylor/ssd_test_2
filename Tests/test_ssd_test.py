@@ -1,5 +1,4 @@
 
-import csv
 import importlib.util
 import tempfile
 import unittest
@@ -37,8 +36,7 @@ class TestInventory(unittest.TestCase):
             )
 
             self.assertEqual(
-                result["TEST123"]["psid"],
-                "",
+                result["TEST123"]["psid"], ""
             )
 
     def test_duplicate_serial(self):
@@ -66,6 +64,30 @@ class TestInventory(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 ssd_test.load_inventory(path)
 
+    def test_invalid_capacity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "inventory.csv"
+
+            path.write_text(
+                "serial,model,capacity_gb,psid\n"
+                "TEST123,MODEL,INVALID,\n"
+            )
+
+            with self.assertRaises(RuntimeError):
+                ssd_test.load_inventory(path)
+
+    def test_missing_columns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "inventory.csv"
+
+            path.write_text(
+                "serial,model\n"
+                "TEST123,MODEL\n"
+            )
+
+            with self.assertRaises(RuntimeError):
+                ssd_test.load_inventory(path)
+
 
 class TestHealth(unittest.TestCase):
 
@@ -86,22 +108,30 @@ class TestHealth(unittest.TestCase):
         data = dict(self.healthy)
         data["media_errors"] = 1
 
-        self.assertFalse(ssd_test.smart_ok(data))
+        self.assertFalse(
+            ssd_test.smart_ok(data)
+        )
 
     def test_critical_warning(self):
         data = dict(self.healthy)
         data["critical_warning"] = 1
 
-        self.assertFalse(ssd_test.smart_ok(data))
+        self.assertFalse(
+            ssd_test.smart_ok(data)
+        )
 
     def test_spare_threshold(self):
         data = dict(self.healthy)
         data["avail_spare"] = 10
 
-        self.assertFalse(ssd_test.smart_ok(data))
+        self.assertFalse(
+            ssd_test.smart_ok(data)
+        )
 
     def test_missing_fields(self):
-        self.assertFalse(ssd_test.smart_ok({}))
+        self.assertFalse(
+            ssd_test.smart_ok({})
+        )
 
 
 class TestSelfTestParsing(unittest.TestCase):
@@ -215,6 +245,49 @@ MBRDone = N, MBREnabled = N
         )
 
 
+class TestResultClassification(unittest.TestCase):
+
+    def test_all_pass(self):
+        self.assertEqual(
+            ssd_test.classify_result(
+                True, True, True
+            ),
+            "PASS",
+        )
+
+    def test_clear_only(self):
+        self.assertEqual(
+            ssd_test.classify_result(
+                True, True, False
+            ),
+            "CLEAR_ONLY",
+        )
+
+    def test_failed_health(self):
+        self.assertEqual(
+            ssd_test.classify_result(
+                True, False, True
+            ),
+            "FAIL",
+        )
+
+    def test_failed_clear(self):
+        self.assertEqual(
+            ssd_test.classify_result(
+                False, True, True
+            ),
+            "FAIL",
+        )
+
+    def test_all_failed(self):
+        self.assertEqual(
+            ssd_test.classify_result(
+                False, False, False
+            ),
+            "FAIL",
+        )
+
+
 class TestFullVerification(unittest.TestCase):
 
     def test_zero_device(self):
@@ -233,13 +306,12 @@ class TestFullVerification(unittest.TestCase):
             self.assertEqual(
                 checked, 1024 * 1024
             )
-            self.assertGreaterEqual(
-                elapsed, 0
-            )
+            self.assertGreaterEqual(elapsed, 0)
 
     def test_nonzero_device(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "device.bin"
+
             path.write_bytes(
                 bytes(512) + b"\x01" + bytes(512)
             )
@@ -333,6 +405,69 @@ class TestArchiving(unittest.TestCase):
                     files[0].read_text(),
                     "previous report",
                 )
+
+
+class TestCsvCompatibility(unittest.TestCase):
+
+    def test_old_inventory_format(self):
+        existing = [
+            {
+                "timestamp": "2026-10-10",
+                "serial": "OLD123",
+                "model": "SAMSUNG TEST",
+                "capacity_bytes": "256000000000",
+                "status": "PASS",
+                "zero_overwrite": "PASS",
+                "sample_verification": "PASS",
+                "psid_revert": "PASS",
+            }
+        ]
+
+        new_result = {
+            "timestamp": "2026-10-11",
+            "serial": "NEW456",
+            "model": "SAMSUNG TEST2",
+            "status": "PASS",
+        }
+
+        rows = ssd_test.merge_inventory_rows(
+            existing,
+            new_result,
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            rows[0]["serial"], "OLD123"
+        )
+        self.assertEqual(
+            rows[1]["serial"], "NEW456"
+        )
+        self.assertEqual(
+            rows[0]["status"], "PASS"
+        )
+
+    def test_reprocessing_updates_summary(self):
+        existing = [
+            {
+                "serial": "SAME123",
+                "status": "FAIL",
+            }
+        ]
+
+        new_result = {
+            "serial": "SAME123",
+            "status": "PASS",
+        }
+
+        rows = ssd_test.merge_inventory_rows(
+            existing,
+            new_result,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["status"], "PASS"
+        )
 
 
 if __name__ == "__main__":
